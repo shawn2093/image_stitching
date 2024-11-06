@@ -174,29 +174,29 @@ def warp(homography, img1, img2, img_name):
     # Inverse warping
     return inverse_warp(bottom, right, corners, homography, img1, img2, img_name, direction)
 
-def stitching(img1, img2, ratio = 0.5, directory):
+def stitching(img1, img2, directory, ratio = 0.5):
     img1_cv = cv2.imread(img1)
     img2_cv = cv2.imread(img2)
     img_name = img1.split('/')[-1].split('.')[0] + '_' + img2.split('/')[-1].split('.')[0]
-    match, kp1, kp2 = feature_match(img1, img2, ratio)
+    match, kp1, kp2 = feature_match(img1, img2, ratio, directory)
     best_homo, best_match = ransac(match, kp1, kp2, 8, 1000, 0.5)
     direction, res_img = warp(best_homo, img1, img2, img_name)
     top = direction[0]
     bottom = direction[0] + img1_cv.shape[0]
     left = direction[2]
     right = direction[3]
-    cv2.imwrite(f'{directory}≥…panorama_{img_name}.jpg', res_img[top:bottom, left:right])
+    cv2.imwrite(f'{directory}/panorama_{img_name}.jpg', res_img[top:bottom, left:right])
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--left", type=str, default="./data/1.jpg")
-    parser.add_argument("--right", type=str, default="./data/2.jpg")
+    parser.add_argument("--left", type=str, default="./data/hill1.JPG")
+    parser.add_argument("--right", type=str, default="./data/hill2.JPG")
     parser.add_argument("--output", type=str, default="./")
     parser.add_argument("--ratio", type=float, default=0.5)
     args = parser.parse_args()
 
-    if img1 is None or img2 is None:
+    if args.left is None or args.right is None:
         print("Error loading images.")
         exit()
-    stitching(args.left, args.right, args.ratio, args.output)
+    stitching(args.left, args.right, args.output, args.ratio)
     
