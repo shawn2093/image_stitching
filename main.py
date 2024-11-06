@@ -174,6 +174,37 @@ def warp(homography, img1, img2, img_name):
     # Inverse warping
     return inverse_warp(bottom, right, corners, homography, img1, img2, img_name, direction)
 
+
+def crop_blank_region(im):
+    gray = np.mean(im, axis=2)
+    h, w = gray.shape
+    mask = gray < 3
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        return im
+
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    y_diff, x_diff = y_max - y_min, x_max - x_min
+    y_crop, x_crop = y_diff * w, x_diff * h
+
+
+    if y_min == 0 and y_crop < x_crop: # blank at top-left/right, crop top side
+        im = im[y_max:h, 0:w]
+    elif y_min == 0 and y_crop >= x_crop and x_min == 0: # blank at top-left, crop left side
+        im = im[0:h, x_max:w]
+    elif y_min == 0 and y_crop >= x_crop: # blank at top-right, crop right side
+        im = im[0:h, 0:x_min]
+    elif y_max == h - 1 and y_crop < x_crop: # blank at bottom-left/right, crop bottom side
+        im = im[0:y_min, 0:w]
+    elif y_max == h - 1 and y_crop >= x_crop and x_min == 0: # blank at bottom-left, crop left side
+        im = im[0:h, x_max:w]
+    elif y_max == h - 1 and y_crop >= x_crop: # blank at bottom-right, crop right side
+        im = im[0:h, 0:x_min]
+
+    return im
+
+
 def stitching(img1, img2, directory, ratio = 0.5):
     img1_cv = cv2.imread(img1)
     img2_cv = cv2.imread(img2)
@@ -185,12 +216,16 @@ def stitching(img1, img2, directory, ratio = 0.5):
     bottom = direction[0] + img1_cv.shape[0]
     left = direction[2]
     right = direction[3]
-    cv2.imwrite(f'{directory}/panorama_{img_name}.jpg', res_img[top:bottom, left:right])
+    res_img = res_img[top:bottom, left:right]
+
+    cv2.imwrite(f'{directory}/panorama_{img_name}.jpg', res_img)
+    cv2.imwrite(f'{directory}/panorama_cropped_{img_name}.jpg', crop_blank_region(res_img))
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--left", type=str, default="./data/hill1.JPG")
-    parser.add_argument("--right", type=str, default="./data/hill2.JPG")
+    parser.add_argument("--left", type=str, default="./data/1.jpg")
+    parser.add_argument("--right", type=str, default="./data/2.jpg")
     parser.add_argument("--output", type=str, default="./")
     parser.add_argument("--ratio", type=float, default=0.5)
     args = parser.parse_args()
@@ -199,4 +234,3 @@ if __name__ == '__main__':
         print("Error loading images.")
         exit()
     stitching(args.left, args.right, args.output, args.ratio)
-    
