@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 import math
+import os
+import glob
+import shutil
 from argparse import ArgumentParser
 import matplotlib.pyplot as plt
 from numpy.linalg import norm, svd, inv
@@ -16,7 +19,7 @@ def sift(img_path):
     cv2.imwrite(f"sift_{img_name}.jpg", img_colors)
     return img, keypoints, descriptors, img_name
 
-def feature_match(img_path1, img_path2, ratio, directory):
+def feature_match(img_path1, img_path2, ratio):
     img1, kp1, des1, name1 = sift(img_path1)
     img2, kp2, des2, name2 = sift(img_path2)
     size1, size2 = len(des1), len(des2)
@@ -38,44 +41,37 @@ def feature_match(img_path1, img_path2, ratio, directory):
         pts1 = (int(kp1[i].pt[0]), int(kp1[i].pt[1]))
         pts2 = (int(kp2[j].pt[0] + w1), int(kp2[j].pt[1]))
         cv2.line(output, pts1, pts2, color, 1)
-    cv2.imwrite(f"{directory}matchline_{name1}_{name2}.jpg", output)
-    return matches, kp1, kp2
+    cv2.imwrite(f"matchline_{name1}_{name2}.jpg", output)
+    return matches, kp1, kp2, img1, img2
 
-def homomat(min_match_count: int, src, dst):
-    A = np.zeros((min_match_count * 2, 9))
-    # construct the two sets of points
-    for i in range(min_match_count):
-        src1, src2 = src[i, 0, 0], src[i, 0, 1]
+def homomat(min_matches, src, dst):
+    A = np.zeros((min_matches * 2, 9))
+    for i in range(min_matches):
         dst1, dst2 = dst[i, 0, 0], dst[i, 0, 1]
+        src1, src2 = src[i, 0, 0], src[i, 0, 1]
         A[i * 2, :] = [src1, src2, 1, 0, 0, 0, -src1 * dst1, - src2 * dst1, -dst1]
         A[i * 2 + 1, :] = [0, 0, 0, src1, src2, 1, -src1 * dst2, - src2 * dst2, -dst2]
-    
-    # compute the homography between the two sets of points
     [_, S, V] = svd(A)
     m = V[np.argmin(S)]
     m *= 1 / m[-1]
     H = m.reshape((3, 3))
     return H
 
-def ransac(matches, kp1, kp2, min_match_count, num_test:int, threshold: float):
-    if len(matches) > min_match_count:
+def ransac(matches, kp1, kp2, min_matches, num_test, threshold: float):
+    if len(matches) > min_matches:
         src_pts = np.array([kp2[m[1]].pt for m in matches]).reshape(-1, 1, 2)
         dst_pts = np.array([kp1[m[0]].pt for m in matches]).reshape(-1, 1, 2)
         min_outliers_count = math.inf
         
         for _ in range(num_test):
-            indexs = np.random.choice(len(matches), min_match_count, replace=False)
-            homography = homomat(min_match_count, src_pts[indexs], dst_pts[indexs])
-
-            # Warp all left points with computed homography matrix and compare SSDs
+            idx = np.random.choice(len(matches), min_matches, replace=False)
+            homography = homomat(min_matches, src_pts[idx], dst_pts[idx])
             src_pts_reshape = src_pts.reshape(-1, 2)
             one = np.ones((len(src_pts_reshape), 1))
             src_pts_reshape = np.concatenate((src_pts_reshape, one), axis=1)
             warped_left = np.array(np.mat(homography) * np.mat(src_pts_reshape).T)
             for i, value in enumerate(warped_left.T):
                 warped_left[:, i] = (value * (1 / value[2])).T
-
-            # Calculate SSD
             dst_pts_reshape = dst_pts.reshape(-1, 2)
             dst_pts_reshape = np.concatenate((dst_pts_reshape, one), axis=1)
             inlier_count = 0
@@ -85,7 +81,6 @@ def ransac(matches, kp1, kp2, min_match_count, num_test:int, threshold: float):
                 if ssd <= threshold:
                     inlier_count += 1
                     inlier_list.append(pair)
-
             if (len(matches) - inlier_count) < min_outliers_count:
                 min_outliers_count = (len(matches) - inlier_count)
                 best_homomat = homography
@@ -114,45 +109,30 @@ def linear_blend(res, window_size, img1, img2, img_name, direction):
             else:
                 res[n+top, m+left] = img1[n, m]
     cv2.imwrite(f"linear_window_warp_{img_name}.jpg", res)
-    return direction, res
+    return res
 
 def inverse_warp(h, w, corners, homography, img1, img2, img_name, direction):
-    
     res_bi = np.zeros((h, w, 3), dtype='uint8')
-
     top = direction[0]
     left = direction[2]
-
-    # Create image 2 grid in image 1 coordinate
     b, t, r, l = math.ceil(max(corners[:, 1])),math.floor(min(corners[:, 1])),math.ceil(max(corners[:, 0])), math.floor(min(corners[:, 0]))
-
     img2_trans_grid = [[n, m, 1] for n in range(l, r) for m in range(min(t, 1), b)]
-    
-    # Inverse mapping points on image 1 to image 2
     img2_trans_inv = np.array(np.mat(inv(homography)) * np.mat(img2_trans_grid).T)
     img2_trans_inv /= img2_trans_inv[2]
-
     for x, y, im in zip(img2_trans_inv[0], img2_trans_inv[1], img2_trans_grid):
         if math.ceil(y) < img2.shape[0] and math.ceil(y)>0 and math.ceil(x) < img2.shape[1] and math.ceil(x)>0:
-            # Bilinear interpolation
             res_bi[im[1]+top,im[0]+left] = (img2[math.ceil(y), math.ceil(x), :]*((y-math.floor(y))*(x-math.floor(x)))+
                                                  img2[math.floor(y), math.floor(x), :]*((math.ceil(y)-y)*(math.ceil(x)-x))+
                                                  img2[math.ceil(y), math.floor(x), :]*((y-math.floor(y))*(math.ceil(x)-x))+
                                                  img2[math.floor(y), math.ceil(x), :]*((math.ceil(y)-y)*(x-math.floor(x))))
     cv2.imwrite(f'backward_bi_{img_name}.jpg', res_bi)
-    return linear_blend(res_bi, 0, img1, img2, img_name, direction)
+    res = linear_blend(res_bi, 0, img1, img2, img_name, direction)
+    return res
 
 def warp(homography, img1, img2, img_name):
-    
-    # Transform image 2 with homography matrix
-    img1 = cv2.imread(img1)
-    img2 = cv2.imread(img2)
     img2_grid = [[n, m, 1] for n in range(img2.shape[1]) for m in range(img2.shape[0])]
     img2_trans = np.array(np.mat(homography) * np.mat(img2_grid).T)
     img2_trans /= img2_trans[2]
-
-    # Find transformed four corners of image 2 on image 1 coordinate system
-
     corners = np.zeros((4, 3))
     for p, im in zip(img2_trans.T, img2_grid):
         if im[0] == 0 and im[1] == 0:
@@ -163,64 +143,75 @@ def warp(homography, img1, img2, img_name):
             corners[2] = p
         elif im[0] == img2.shape[1] - 1 and im[1] == img2.shape[0] - 1:
             corners[3] = p
-            
-    # Blended image size
     top = max(0, math.ceil(-min(corners.T[1])))
     bottom = max(img1.shape[0], math.ceil(max(corners.T[1])))+top
     left = max(0, math.ceil(-min(corners.T[0])))
     right = max(img1.shape[1], math.ceil(max(corners.T[0])))+left
     r = max(img1.shape[1], math.ceil(min(corners[2][0],corners[3][0])))+left
     direction = [top, bottom, left, r]
-    # Inverse warping
-    return inverse_warp(bottom, right, corners, homography, img1, img2, img_name, direction)
+    wrapped = inverse_warp(bottom, right, corners, homography, img1, img2, img_name, direction)
+    cv2.imwrite(f'wrapped_{img_name}.jpg', wrapped)
+    return direction, wrapped
 
 
-def crop_blank_region(im):
-    gray = np.mean(im, axis=2)
-    h, w = gray.shape
-    mask = gray < 3
-    coords = np.argwhere(mask)
-    if coords.size == 0:
-        return im
+def crop_blank_region(direction, im):
+    im = im[direction[0]:direction[1], direction[2]:direction[3]]
+    h, w = im.shape[:2]
+    # check from top right corner first
+    w_count = h_count = 0
+    rgb_self = left_rgb = bottom_rgb = 0
+    left_rgb = np.mean(im[h_count, w-2-w_count])
+    bottom_rgb = np.mean(im[1+h_count, w-1-w_count])
+    while bottom_rgb == 0:
+        h_count += 1
+        bottom_rgb = np.mean(im[1+h_count, w-1-w_count])
+    left_rgb = np.mean(im[h_count, w-2-w_count])
+    while left_rgb == 0:
+        w_count += 1
+        left_rgb = np.mean(im[h_count, w-2-w_count])
+    bottom_rgb = np.mean(im[1+h_count, w-1-w_count])
+    while bottom_rgb == 0:
+        h_count += 1
+        bottom_rgb = np.mean(im[1+h_count, w-1-w_count])
+    min_h = max(h_count + 1, 0)
+    im = im[min_h:,:]
 
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
-    y_diff, x_diff = y_max - y_min, x_max - x_min
-    y_crop, x_crop = y_diff * w, x_diff * h
-
-
-    if y_min == 0 and y_crop < x_crop: # blank at top-left/right, crop top side
-        im = im[y_max:h, 0:w]
-    elif y_min == 0 and y_crop >= x_crop and x_min == 0: # blank at top-left, crop left side
-        im = im[0:h, x_max:w]
-    elif y_min == 0 and y_crop >= x_crop: # blank at top-right, crop right side
-        im = im[0:h, 0:x_min]
-    elif y_max == h - 1 and y_crop < x_crop: # blank at bottom-left/right, crop bottom side
-        im = im[0:y_min, 0:w]
-    elif y_max == h - 1 and y_crop >= x_crop and x_min == 0: # blank at bottom-left, crop left side
-        im = im[0:h, x_max:w]
-    elif y_max == h - 1 and y_crop >= x_crop: # blank at bottom-right, crop right side
-        im = im[0:h, 0:x_min]
+    # check from bottom right corner first
+    h, w = im.shape[:2]
+    w_count = h_count = 0
+    rgb_self = left_rgb = bottom_rgb = 0
+    left_rgb = np.mean(im[h-h_count-1, w-2-w_count])
+    top_rgb = np.mean(im[h-2-h_count, w-1-w_count])
+    while top_rgb == 0:
+        h_count += 1
+        top_rgb = np.mean(im[h-2-h_count, w-1-w_count])
+    left_rgb = np.mean(im[h-1-h_count, w-2-w_count])
+    while left_rgb == 0:
+        w_count += 1
+        left_rgb = np.mean(im[h-1-h_count, w-2-w_count])
+    top_rgb = np.mean(im[h-2-h_count, w-1-w_count])
+    while top_rgb == 0:
+        h_count += 1
+        top_rgb = np.mean(im[h-2-h_count, w-1-w_count])
+    max_h = min(h - (h_count + 1), h - 1)
+    im = im[:max_h,:]
 
     return im
 
-
-def stitching(img1, img2, directory, ratio = 0.5):
-    img1_cv = cv2.imread(img1)
-    img2_cv = cv2.imread(img2)
+def stitching(img1, img2, directory, ratio):
     img_name = img1.split('/')[-1].split('.')[0] + '_' + img2.split('/')[-1].split('.')[0]
-    match, kp1, kp2 = feature_match(img1, img2, ratio, directory)
+    match, kp1, kp2, img1_cv, img2_cv = feature_match(img1, img2, ratio)
     best_homo, best_match = ransac(match, kp1, kp2, 8, 1000, 0.5)
-    direction, res_img = warp(best_homo, img1, img2, img_name)
-    top = direction[0]
-    bottom = direction[0] + img1_cv.shape[0]
-    left = direction[2]
-    right = direction[3]
-    res_img = res_img[top:bottom, left:right]
-
-    cv2.imwrite(f'{directory}/panorama_{img_name}.jpg', res_img)
-    cv2.imwrite(f'{directory}/panorama_cropped_{img_name}.jpg', crop_blank_region(res_img))
-
+    direction, res_img = warp(best_homo, img1_cv, img2_cv, img_name)
+    direction[1] = direction[0] + img1_cv.shape[0]
+    cv2.imwrite(f'panorama_{img_name}.jpg', crop_blank_region(direction, res_img))
+    source_dir = './'
+    destination_dir = f'./{img_name}'
+    os.makedirs(destination_dir, exist_ok=True)
+    for file_path in glob.glob(os.path.join(source_dir, '*.jpg')):
+        filename = os.path.basename(file_path)
+        destination_path = os.path.join(destination_dir, filename)
+        shutil.move(file_path, destination_path)
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -229,7 +220,6 @@ if __name__ == '__main__':
     parser.add_argument("--output", type=str, default="./")
     parser.add_argument("--ratio", type=float, default=0.5)
     args = parser.parse_args()
-
     if args.left is None or args.right is None:
         print("Error loading images.")
         exit()
